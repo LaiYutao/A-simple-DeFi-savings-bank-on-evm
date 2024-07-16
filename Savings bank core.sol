@@ -87,28 +87,39 @@ contract SavingSystem is Pausable, BlackList{
         showType[DepositType.Demand]="Demand deposit";
         showType[DepositType.HalfYear]="Half year deposit";
         showType[DepositType.OneYear]="One year deposit";
+        showDuration[DepositType.HalfYear] = 182;
+        showDuration[DepositType.OneYear] = 365;
+        showDmInterestRate[DepositType.Demand] = 50; // 活期利率； 万分之一计；
+        showDmInterestRate[DepositType.HalfYear] = 200; //半年利率；万分之一计；
+        showDmInterestRate[DepositType.OneYear] = 250; //一年利率；万分之一计；
+
     }
     
-    enum DepositType{Demand, HalfYear, OneYear}
-    uint public DmDemandDepositInterestRate = 50; // 活期利率； 万分之一计；
-    uint public DmHalfYearDepositInterestRate = 200; //半年利率；万分之一计；
-    uint public DmOneYearDepositInterestRate = 250; //一年利率；万分之一计；
+    enum DepositType{Demand, HalfYear, OneYear} //存款类型枚举
 
+    //事件
+    event Received(address sender,uint value,uint time);
     event changeDepositInterestRate(string depositType,uint from ,uint to);
+    event madeDemandDeposit(address customer,uint value,uint time);
+    event madeHalfYearDeposit(address customer,uint value,uint time);
+    event madeOneYearDeposit(address customer,uint value,uint time);
+    event tookMoney(address customer,string depositType, uint value,uint timeOfSaving,uint timeOfTaking);
+    event tookMoneyTooEarly(string);
+
 
     function changeDemandDepositInterestRate(uint _newInterestRate) external onlyOwner {  //更改活期利率
-        emit changeDepositInterestRate("DmDemandDepositInterestRate",DmDemandDepositInterestRate,_newInterestRate);
-        DmDemandDepositInterestRate = _newInterestRate;
+        emit changeDepositInterestRate("DmDemandDepositInterestRate",showDmInterestRate[DepositType.Demand],_newInterestRate);
+        showDmInterestRate[DepositType.Demand] = _newInterestRate;
     }
 
         function changeHalfYearDepositInterestRate(uint _newInterestRate) external onlyOwner{  //更改半年利率
-        emit changeDepositInterestRate("DmHalfYearDepositInterestRate",DmHalfYearDepositInterestRate,_newInterestRate);
-        DmHalfYearDepositInterestRate = _newInterestRate;
+        emit changeDepositInterestRate("DmHalfYearDepositInterestRate",showDmInterestRate[DepositType.HalfYear],_newInterestRate);
+        showDmInterestRate[DepositType.HalfYear] = _newInterestRate;
     }
 
      function changeOneYearDepositInterestRate(uint _newInterestRate) external onlyOwner{  //更改半年利率
-        emit changeDepositInterestRate("DmOneYearDepositInterestRate",DmOneYearDepositInterestRate,_newInterestRate);
-        DmOneYearDepositInterestRate = _newInterestRate;
+        emit changeDepositInterestRate("DmOneYearDepositInterestRate",showDmInterestRate[DepositType.OneYear],_newInterestRate);
+        showDmInterestRate[DepositType.OneYear] = _newInterestRate;
     }
     
     //mapping
@@ -116,8 +127,8 @@ contract SavingSystem is Pausable, BlackList{
     mapping (address=>mapping(uint=>uint)) corrective; //取款后，删除存单，需要进行编号重定位；就不用多次复制其他序号的结构体了 
     mapping (address=>number) getNumber; //获取number结构体
     mapping (DepositType=>string) showType;
-
-
+    mapping (DepositType=>uint) showDuration; 
+    mapping (DepositType=>uint) showDmInterestRate;
 
     //存单结构体
     struct certificate{
@@ -131,14 +142,6 @@ contract SavingSystem is Pausable, BlackList{
         uint currentNumber;
         uint historyNumber;  //历史存单继续往后；和当前存单的差值就是新存单的偏移量
     }
-
-    //事件
-    event Received(address sender,uint value,uint time);
-    event madeDemandDeposit(address customer,uint value,uint time);
-    event madeHalfYearDeposit(address customer,uint value,uint time);
-    event madeOneYearDeposit(address customer,uint value,uint time);
-    event tookMoney(address customer,string depositType, uint value,uint timeOfSaving,uint timeOfTaking);
-    event tookMoneyTooEarly(string);
 
     receive() external payable { 
         emit Received(msg.sender,msg.value,block.timestamp);
@@ -187,50 +190,39 @@ contract SavingSystem is Pausable, BlackList{
             getNumber[msg.sender].currentNumber--; //现存存单数量减一。
     }
 
+    //定期取款函数
+    function takeTimeDeposit(DepositType depositType,uint duration,uint aimedOrder) internal{
+         uint calculatedAmount;
+        if(duration >= showDuration[depositType]){ //到期，超出时间的转为活期
+            calculatedAmount = checking[msg.sender][aimedOrder].amount + duration * showDmInterestRate[depositType]/10000/365 * checking[msg.sender][aimedOrder].amount;
+            payable(msg.sender).transfer(calculatedAmount);
+        }
+        else{ //未到期取款
+            calculatedAmount = checking[msg.sender][aimedOrder].amount;
+            payable(msg.sender).transfer(checking[msg.sender][aimedOrder].amount);
+            emit tookMoneyTooEarly("Took money too early. No interest."); //提前取款，没有利息，只能去取出本金。
+        }
+        emit tookMoney(msg.sender,showType[depositType],calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
+    }
+
     //取钱
     function takeMoney(uint _order) external whenNotPaused onlyValid payable{
         uint aimedOrder = corrective[msg.sender][_order]; //对应到历史存单
-       
-        if(checking[msg.sender][aimedOrder].depositType == DepositType.Demand){
-            uint duration = (block.timestamp - checking[msg.sender][aimedOrder].saveTime)/84600; //单位为天
-            uint calculatedAmount = checking[msg.sender][aimedOrder].amount + duration * DmDemandDepositInterestRate/10000/365 * checking[msg.sender][aimedOrder].amount;
+        uint duration = (block.timestamp - checking[msg.sender][aimedOrder].saveTime)/84600; //已存放时间，单位为天
+        uint calculatedAmount;
+        DepositType depositType = checking[msg.sender][aimedOrder].depositType;
+
+        //活期
+        if(depositType == DepositType.Demand){ 
+            calculatedAmount = checking[msg.sender][aimedOrder].amount + duration * showDmInterestRate[depositType]/10000/365 * checking[msg.sender][aimedOrder].amount;
             payable(msg.sender).transfer(calculatedAmount);
             emit tookMoney(msg.sender,"Demand deposit",calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
-            
-            //再排序
-            reset(_order,aimedOrder);
         }
-        else if(checking[msg.sender][aimedOrder].depositType == DepositType.HalfYear){
-            uint duration = (block.timestamp - checking[msg.sender][aimedOrder].saveTime)/84600;
-            if( duration >=182 ){ //182是半年,超出时间的转为活期。
-                uint calculatedAmount = checking[msg.sender][aimedOrder].amount + 182 * DmHalfYearDepositInterestRate/10000/365 * checking[msg.sender][aimedOrder].amount + (duration - 182)*DmDemandDepositInterestRate/10000/365*checking[msg.sender][aimedOrder].amount;
-                payable(msg.sender).transfer(calculatedAmount);
-                emit tookMoney(msg.sender,"Half year deposit",calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
-            }
-            else{
-                uint calculatedAmount = checking[msg.sender][aimedOrder].amount;
-                payable(msg.sender).transfer(calculatedAmount);
-                emit tookMoney(msg.sender,"Half year deposit",calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
-                emit tookMoneyTooEarly("Took money too early. No interest."); //提前取款，没有利息，只能去取出本金。
-            }
-            //再排序
-            reset(_order,aimedOrder);
+        //定期
+        else{
+            takeTimeDeposit(depositType,duration,aimedOrder);
         }
-        else if(checking[msg.sender][aimedOrder].depositType == DepositType.OneYear){
-            uint duration = (block.timestamp - checking[msg.sender][aimedOrder].saveTime)/84600;
-             if( duration >=365 ){ 
-                uint calculatedAmount = checking[msg.sender][aimedOrder].amount +  DmOneYearDepositInterestRate/10000 * checking[msg.sender][aimedOrder].amount + (duration -365)*DmDemandDepositInterestRate/10000/365*checking[msg.sender][aimedOrder].amount;
-                payable(msg.sender).transfer(calculatedAmount);
-                emit tookMoney(msg.sender,"One year deposit",calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
-            }
-            else{
-                uint calculatedAmount = checking[msg.sender][aimedOrder].amount;
-                payable(msg.sender).transfer(calculatedAmount);
-                emit tookMoney(msg.sender,"One year deposit",calculatedAmount,checking[msg.sender][aimedOrder].saveTime,block.timestamp);
-                emit tookMoneyTooEarly("Took money too early. No interest."); //提前取款，没有利息，只能去取出本金。
-            }
-             //再排序
-            reset(_order,aimedOrder);
-        }
+        //再排序
+        reset(_order,aimedOrder);
     }
 }
